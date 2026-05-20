@@ -11,7 +11,7 @@ from sklearn.impute import KNNImputer
 from ucimlrepo import fetch_ucirepo
 import numpy as np
 
-API_URL = "http://127.0.0.1:8000/predict"
+API_URL = "https://ckd-project-0267.onrender.com/predict"
 
 FEATURE_ORDER = [
     'age', 'bp', 'sg', 'al', 'su', 'rbc', 'pc', 'pcc', 'ba',
