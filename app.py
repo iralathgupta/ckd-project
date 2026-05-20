@@ -1,17 +1,37 @@
-# pip install streamlit pandas requests json
-
-import streamlit as st
-import pandas as pd
-import requests
-import json
+import os
 import joblib
+import numpy as np
+import pandas as pd
+import shap
+
+from enum import Enum
+from pathlib import Path
+from string import Template
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from typing import Optional
+from dotenv import load_dotenv
+from anthropic import Anthropic
+from lime.lime_tabular import LimeTabularExplainer
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.impute import KNNImputer
 from ucimlrepo import fetch_ucirepo
-import numpy as np
 
-API_URL = "https://ckd-project-0267.onrender.com/predict"
+# ── Environment ───────────────────────────────────────────────────────────────
+
+load_dotenv()
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+# ── App ───────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="CKD Risk Prediction API",
+    description="Cloud-deployed explainable ML system for early detection of Chronic Kidney Disease",
+    version="1.0.0"
+)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
 
 FEATURE_ORDER = [
     'age', 'bp', 'sg', 'al', 'su', 'rbc', 'pc', 'pcc', 'ba',
@@ -19,26 +39,56 @@ FEATURE_ORDER = [
     'rbcc', 'htn', 'dm', 'cad', 'appet', 'pe', 'ane'
 ]
 
-# ── Page config ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="CKD Risk Predictor",
-    page_icon="🩺",
-    layout="wide"
-)
+PROMPT_FILE = Path(__file__).resolve().parent / "prompt_templates.txt"
 
-st.title("🩺 CKD Risk Prediction System")
-st.caption("Cloud-deployed explainable ML system for early detection of Chronic Kidney Disease")
-st.divider()
 
-# ── Load test data (cached so it only runs once) ─────────────
-@st.cache_data
-def load_test_data():
+def load_prompt_templates():
+    raw_text = PROMPT_FILE.read_text(encoding="utf-8")
+    templates = {}
+    current_name = None
+    current_lines = []
+
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if current_name:
+                templates[current_name] = "\n".join(current_lines).strip()
+            current_name = stripped.strip("[]").lower()
+            current_lines = []
+        elif current_name is not None:
+            current_lines.append(line)
+
+    if current_name:
+        templates[current_name] = "\n".join(current_lines).strip()
+
+    return templates
+
+
+PROMPT_TEMPLATES = load_prompt_templates()
+
+
+def render_prompt(template_name: str, **kwargs) -> str:
+    template_text = PROMPT_TEMPLATES.get(template_name)
+    if template_text is None:
+        raise ValueError(f"Prompt template '{template_name}' not found in {PROMPT_FILE}")
+    return Template(template_text).substitute(**kwargs)
+
+
+# ── Load model and explainers ─────────────────────────────────────────────────
+
+model    = joblib.load("ckd_model.pkl")
+medians  = joblib.load("feature_medians.pkl")
+explainer = shap.TreeExplainer(model)
+
+# ── Rebuild LIME explainer from training data ─────────────────────────────────
+# LIME needs the training data distribution to generate local explanations
+
+def build_lime_explainer():
     ckd = fetch_ucirepo(id=336)
-    df = pd.concat([ckd.data.features, ckd.data.targets], axis=1)
+    df  = pd.concat([ckd.data.features, ckd.data.targets], axis=1)
     df['class'] = df['class'].str.strip()
 
     cat_cols = df.select_dtypes(include='object').columns.tolist()
-    num_cols = df.select_dtypes(include=['float64', 'int64']).columns.tolist()
 
     df_encoded = df.copy()
     le = LabelEncoder()
@@ -46,201 +96,251 @@ def load_test_data():
         df_encoded[col] = df_encoded[col].fillna('missing')
         df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
 
-    imputer = KNNImputer(n_neighbors=5)
-    df_imputed_array = imputer.fit_transform(df_encoded)
-    df_imputed = pd.DataFrame(df_imputed_array, columns=df.columns)
+    imputer       = KNNImputer(n_neighbors=5)
+    df_imputed    = pd.DataFrame(imputer.fit_transform(df_encoded), columns=df.columns)
+    X             = df_imputed.drop('class', axis=1)
+    y             = df_imputed['class']
+    X_train, _, _, _ = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-    X = df_imputed.drop('class', axis=1)
-    y = df_imputed['class']
-    _, X_test, _, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    return X_test.reset_index(drop=True), y_test.reset_index(drop=True)
-
-X_test, y_test = load_test_data()
-
-# ── Sidebar controls ─────────────────────────────────────────
-with st.sidebar:
-    st.header("Settings")
-
-    # Toggle 1: View mode
-    st.subheader("View Mode")
-    view_mode = st.radio(
-        "Who is viewing this result?",
-        options=["patient", "clinic"],
-        format_func=lambda x: "🧑 Patient View" if x == "patient" else "🏥 Clinic View",
-        help="Patient view uses plain English. Clinic view includes ICD-10 codes, PubMed citations, and clinical trial matches via MCP."
+    return LimeTabularExplainer(
+        training_data  = X_train.values,
+        feature_names  = FEATURE_ORDER,
+        class_names    = ['notckd', 'ckd'],
+        mode           = 'classification'
     )
 
-    st.divider()
+lime_explainer = build_lime_explainer()
 
-    # Toggle 2: Input mode
-    st.subheader("Input Mode")
-    input_mode = st.radio(
-        "How would you like to provide patient data?",
-        options=["test", "manual"],
-        format_func=lambda x: "📋 Test Dataset Record" if x == "test" else "✏️ Manual JSON Input"
+# ── View mode enum ────────────────────────────────────────────────────────────
+
+class ViewMode(str, Enum):
+    patient = "patient"
+    clinic  = "clinic"
+
+# ── Input schema ──────────────────────────────────────────────────────────────
+
+class PatientData(BaseModel):
+    # Mandatory
+    hemo: float = Field(..., description="Haemoglobin level (g/dL)",         example=11.2)
+    sg:   float = Field(..., description="Specific gravity",                  example=1.015)
+    sc:   float = Field(..., description="Serum creatinine (mg/dL)",          example=1.2)
+    al:   float = Field(..., description="Albumin in urine (0–5 scale)",      example=1.0)
+    pcv:  float = Field(..., description="Packed cell volume (%)",            example=38.0)
+
+    # Strongly recommended
+    age:  Optional[float] = Field(None, description="Age in years")
+    bp:   Optional[float] = Field(None, description="Blood pressure (mm/Hg)")
+    bgr:  Optional[float] = Field(None, description="Blood glucose random (mg/dL)")
+    bu:   Optional[float] = Field(None, description="Blood urea (mg/dL)")
+    sod:  Optional[float] = Field(None, description="Sodium (mEq/L)")
+    htn:  Optional[int]   = Field(None, description="Hypertension (0=no, 1=yes)")
+    dm:   Optional[int]   = Field(None, description="Diabetes mellitus (0=no, 1=yes)")
+
+    # Optional
+    su:    Optional[float] = Field(None, description="Sugar (0–5 scale)")
+    rbc:   Optional[int]   = Field(None, description="Red blood cells in urine (0=normal, 1=abnormal)")
+    pc:    Optional[int]   = Field(None, description="Pus cells (0=normal, 1=abnormal)")
+    pcc:   Optional[int]   = Field(None, description="Pus cell clumps (0=notpresent, 1=present)")
+    ba:    Optional[int]   = Field(None, description="Bacteria (0=notpresent, 1=present)")
+    pot:   Optional[float] = Field(None, description="Potassium (mEq/L)")
+    wbcc:  Optional[float] = Field(None, description="White blood cell count (cells/cumm)")
+    rbcc:  Optional[float] = Field(None, description="Red blood cell count (millions/cmm)")
+    cad:   Optional[int]   = Field(None, description="Coronary artery disease (0=no, 1=yes)")
+    appet: Optional[int]   = Field(None, description="Appetite (0=good, 1=poor)")
+    pe:    Optional[int]   = Field(None, description="Pedal edema (0=no, 1=yes)")
+    ane:   Optional[int]   = Field(None, description="Anaemia (0=no, 1=yes)")
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def impute_missing(data: dict) -> dict:
+    """Fill missing optional fields with training set medians."""
+    for feat in FEATURE_ORDER:
+        if data.get(feat) is None:
+            data[feat] = medians[feat]
+    return data
+
+
+def extract_shap(df_input: pd.DataFrame):
+    """Return a flat (n_features,) numpy array of SHAP values for one sample."""
+    raw = explainer.shap_values(df_input)
+
+    if isinstance(raw, list):
+        # Random Forest — returns [class_0, class_1], each shape (1, n_features)
+        vals = np.array(raw[1]).flatten()
+    else:
+        # XGBoost — returns shape (1, n_features)
+        vals = np.array(raw).flatten()
+
+    return vals[:len(FEATURE_ORDER)]
+
+
+def extract_lime(df_input: pd.DataFrame, top_n: int = 5) -> list:
+    """Return LIME feature-weight pairs for one sample."""
+    exp = lime_explainer.explain_instance(
+        df_input.iloc[0].values,
+        model.predict_proba,
+        num_features=top_n
+    )
+    return exp.as_list()
+
+
+def build_shap_global_summary(shap_values_all, top_n: int = 10) -> str:
+    """Mean absolute SHAP per feature across the whole test set."""
+    mean_abs = np.abs(shap_values_all).mean(axis=0)
+    ranked   = sorted(zip(FEATURE_ORDER, mean_abs), key=lambda x: x[1], reverse=True)[:top_n]
+
+    lines = ["Global feature importance (averaged across all test patients):"]
+    for i, (feat, imp) in enumerate(ranked, 1):
+        lines.append(f"  {i}. {feat}: mean |SHAP| = {imp:.4f}")
+
+    lines.append("\nDirection of top 3 features:")
+    for feat, _ in ranked[:3]:
+        idx  = FEATURE_ORDER.index(feat)
+        mean = shap_values_all[:, idx].mean()
+        direction = "generally increases CKD risk" if mean > 0 else "generally decreases CKD risk"
+        lines.append(f"  - {feat}: {direction} (mean SHAP = {mean:.4f})")
+
+    return "\n".join(lines)
+
+
+def build_lime_local_summary(lime_pairs: list, outcome: str, confidence: float) -> str:
+    lines = [
+        f"Local explanation:",
+        f"  Prediction : {outcome} (confidence: {confidence:.1%})",
+        f"  Feature conditions that influenced this prediction:"
+    ]
+    for condition, weight in lime_pairs:
+        direction = "toward CKD" if weight > 0 else "away from CKD"
+        lines.append(f"  - {condition}: weight = {weight:.4f} ({direction})")
+    return "\n".join(lines)
+
+# ── Prompt builders ───────────────────────────────────────────────────────────
+
+def build_patient_prompt(outcome: str, confidence: float, ckd_probability: float,
+                         pairs: list, shap_lines: list) -> str:
+
+    top_features = [f for f, s, v in pairs[:3]]
+    plain_outcome = (
+        "your kidneys may be showing signs of chronic kidney disease"
+        if "CKD detected" in outcome
+        else "your kidneys appear to be healthy"
     )
 
-# ── Input section ─────────────────────────────────────────────
-st.subheader("Patient Data")
+    return render_prompt(
+        "patient",
+        plain_outcome=plain_outcome,
+        confidence=f"{confidence:.1%}",
+        top_features=", ".join(top_features),
+        shap_lines="\n".join(shap_lines)
+    )
 
-patient_data = None
 
-if input_mode == "test":
-    col1, col2 = st.columns([2, 1])
+def build_clinic_prompt(outcome, confidence, ckd_probability,
+                        pairs, shap_lines, lime_local, shap_global):
+    patient_values = "\n".join([
+        f"- {f}: {float(v):.2f} (SHAP contribution: {float(s):+.3f})"
+        for f, s, v in pairs
+    ])
 
-    with col1:
-        patient_index = st.slider(
-            "Select a patient from the test dataset",
-            min_value=0,
-            max_value=len(X_test) - 1,
-            value=0,
-            help=f"80 patients in the test set (indices 0–{len(X_test)-1})"
+    return render_prompt(
+        "clinic",
+        outcome=outcome,
+        confidence=f"{confidence:.1%}",
+        ckd_probability=f"{ckd_probability:.1%}",
+        patient_values=patient_values,
+        lime_local=lime_local,
+        shap_global=shap_global
+    )
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    key_loaded = os.getenv("ANTHROPIC_API_KEY") is not None
+    return {"status": "ok", "api_key_loaded": key_loaded}
+
+
+@app.post("/predict")
+def predict(patient: PatientData, view: ViewMode = ViewMode.patient):
+
+    # 1 — Impute and build dataframe
+    data     = patient.dict()
+    data     = impute_missing(data)
+    df_input = pd.DataFrame([data])[FEATURE_ORDER]
+
+    # 2 — Predict
+    prediction      = int(model.predict(df_input)[0])
+    proba           = model.predict_proba(df_input)[0]
+    ckd_probability = float(proba[1])
+    confidence      = ckd_probability if prediction == 1 else float(proba[0])
+    outcome         = "CKD detected" if prediction == 1 else "No CKD detected"
+
+    # 3 — SHAP local
+    shap_vals = extract_shap(df_input)
+
+    pairs = sorted(
+        zip(FEATURE_ORDER, [float(v) for v in shap_vals], [float(v) for v in df_input.iloc[0].values.tolist()]),
+        key=lambda x: abs(x[1]),
+        reverse=True
+    )[:5]
+
+    shap_lines = [
+        f"- {f}: value={v:.2f}, contribution={s:+.3f} "
+        f"({'higher' if s > 0 else 'lower'} risk)"
+        for f, s, v in pairs
+    ]
+
+    # 4 — LIME local
+    lime_pairs = extract_lime(df_input, top_n=5)
+    lime_local = build_lime_local_summary(lime_pairs, outcome, confidence)
+
+    # 5 — SHAP global (run on a small sample for speed — use df_input as proxy)
+    # Ideally pass your full X_test here; for the API we use the single input
+    shap_global = build_shap_global_summary(
+        shap_vals.reshape(1, -1)   # single sample fallback
+    )
+
+    # 6 — Build prompt and call Claude
+    if view == ViewMode.patient:
+        prompt = build_patient_prompt(
+            outcome, confidence, ckd_probability, pairs, shap_lines
+        )
+        message = client.messages.create(
+            model      = "claude-sonnet-4-20250514",
+            max_tokens = 400,
+            messages   = [{"role": "user", "content": prompt}]
         )
 
-    with col2:
-        actual_label = "CKD" if y_test.iloc[patient_index] == 1 else "No CKD"
-        st.metric(
-            label="Actual diagnosis (ground truth)",
-            value=actual_label,
-            help="This is the confirmed diagnosis from the dataset — used to check model accuracy"
+    elif view == ViewMode.clinic:
+        prompt = build_clinic_prompt(
+            outcome, confidence, ckd_probability,
+            pairs, shap_lines, lime_local, shap_global
+        )
+        message = client.messages.create(
+            model      = "claude-sonnet-4-20250514",
+            max_tokens = 2000,
+            messages   = [{"role": "user", "content": prompt}],
+            mcp_servers = [
+                {
+                    "type": "url",
+                    "url" : "https://mcp.healthcare-server-url.com/sse",
+                    "name": "healthcare-mcp"
+                }
+            ]
         )
 
-    # Show the selected patient's data as a readable table
-    selected = X_test.iloc[patient_index]
-    st.dataframe(
-        selected.to_frame(name="Value").T,
-        use_container_width=True
-    )
+    # 7 — Extract text from response (handles MCP multi-block responses)
+    explanation = " ".join([
+        block.text for block in message.content
+        if hasattr(block, "text")
+    ])
 
-    patient_data = selected.to_dict()
-
-elif input_mode == "manual":
-    st.caption("Enter patient biomarkers as a JSON object. Only the 5 mandatory fields are required — leave others as null.")
-
-    # Build a template JSON with mandatory fields filled and optional as null
-    template = {
-        "hemo": 11.2,
-        "sg": 1.015,
-        "sc": 1.2,
-        "al": 1.0,
-        "pcv": 38.0,
-        "age": None,
-        "bp": None,
-        "bgr": None,
-        "bu": None,
-        "sod": None,
-        "htn": None,
-        "dm": None,
-        "su": None,
-        "rbc": None,
-        "pc": None,
-        "pcc": None,
-        "ba": None,
-        "pot": None,
-        "wbcc": None,
-        "rbcc": None,
-        "cad": None,
-        "appet": None,
-        "pe": None,
-        "ane": None
+    return {
+        "prediction"        : outcome,
+        "confidence"        : round(confidence, 4),
+        "ckd_probability"   : round(ckd_probability, 4),
+        "view_mode"         : view,
+        "shap_contributions": {f: round(s, 4) for f, s, _ in pairs},
+        "lime_contributions": {cond: round(w, 4) for cond, w in lime_pairs},
+        "explanation"       : explanation
     }
-
-    json_input = st.text_area(
-        label="Patient data (JSON)",
-        value=json.dumps(template, indent=2),
-        height=420,
-        help="Mandatory: hemo, sg, sc, al, pcv. All others optional."
-    )
-
-    # Validate JSON in real time
-    try:
-        patient_data = json.loads(json_input)
-        st.success("✓ Valid JSON")
-    except json.JSONDecodeError as e:
-        st.error(f"Invalid JSON: {e}")
-        patient_data = None
-
-# ── Run prediction ────────────────────────────────────────────
-st.divider()
-
-run = st.button(
-    "Run Prediction",
-    type="primary",
-    disabled=patient_data is None,
-    use_container_width=True
-)
-
-if run and patient_data is not None:
-    with st.spinner("Running model and generating explanation..."):
-        try:
-            response = requests.post(
-                API_URL,
-                json=patient_data,
-                params={"view": view_mode},
-                timeout=60
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-
-                st.divider()
-
-                # ── Result header
-                pred = result["prediction"]
-                conf = result["confidence"]
-                ckd_prob = result["ckd_probability"]
-
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Prediction", pred)
-                col2.metric("Confidence", f"{conf:.1%}")
-                col3.metric("CKD Probability", f"{ckd_prob:.1%}")
-
-                st.divider()
-
-                # ── SHAP contributions chart
-                st.subheader("Top Contributing Features")
-                shap_data = result["shap_contributions"]
-                shap_df = pd.DataFrame(
-                    list(shap_data.items()),
-                    columns=["Feature", "SHAP Value"]
-                ).sort_values("SHAP Value", key=abs, ascending=True)
-
-                import plotly.express as px
-                fig = px.bar(
-                    shap_df,
-                    x="SHAP Value",
-                    y="Feature",
-                    orientation="h",
-                    color="SHAP Value",
-                    color_continuous_scale=["#1D9E75", "#ffffff", "#D85A30"],
-                    color_continuous_midpoint=0,
-                    title="Feature contributions (red = toward CKD, green = away from CKD)"
-                )
-                fig.update_layout(
-                    height=300,
-                    coloraxis_showscale=False,
-                    margin=dict(l=0, r=0, t=40, b=0)
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                st.divider()
-
-                # ── Explanation
-                mode_label = "🧑 Patient Explanation" if view_mode == "patient" else "🏥 Clinical Summary"
-                st.subheader(mode_label)
-                st.write(result["explanation"])
-
-                # ── View toggle reminder
-                other = "clinic" if view_mode == "patient" else "patient"
-                other_label = "Clinic View" if other == "clinic" else "Patient View"
-                st.info(f"Switch to **{other_label}** in the sidebar to see the {'detailed clinical summary with ICD-10 codes and PubMed citations' if other == 'clinic' else 'simplified patient-friendly explanation'}.")
-
-            else:
-                st.error(f"API error {response.status_code}: {response.text}")
-
-        except requests.exceptions.ConnectionError:
-            st.error("Could not connect to API. Make sure `uvicorn api:app --reload` is running.")
-        except requests.exceptions.Timeout:
-            st.error("Request timed out. The clinic view MCP lookup can take up to 30 seconds — try again.")
