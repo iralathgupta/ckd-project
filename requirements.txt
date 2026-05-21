@@ -5,7 +5,7 @@ xgboost
 shap
 lime
 pandas
-numpy
+numpy<2
 joblib
 anthropic
 python-dotenv

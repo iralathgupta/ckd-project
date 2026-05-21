@@ -1,13 +1,26 @@
-from fastapi import FastAPI
-from pydantic import BaseModel, Field
-from typing import Optional
+import os
+import traceback
 import joblib
 import numpy as np
 import pandas as pd
 import shap
 import anthropic
+
+from enum import Enum
+from pathlib import Path
+from string import Template
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import Optional
 from dotenv import load_dotenv
-import os
+from lime.lime_tabular import LimeTabularExplainer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.impute import KNNImputer
+from ucimlrepo import fetch_ucirepo
+
+# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="CKD Risk Prediction API",
@@ -15,135 +28,406 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Load saved model and explainer
-model = joblib.load("ckd_model.pkl")
-explainer = shap.TreeExplainer(model)
-load_dotenv(dotenv_path="ANTHROPIC-API-KEY.env") #calling Claude API
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# ── Environment ───────────────────────────────────────────────────────────────
 
-# Feature order must match exactly what the model was trained on
+# load .env first, then fall back to the named key file if it exists
+load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / "ANTHROPIC_API_KEY.env", override=False)
+
+anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+if not anthropic_api_key:
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY not found. Ensure .env or ANTHROPIC_API_KEY.env "
+        "is present and contains ANTHROPIC_API_KEY."
+    )
+
+client = anthropic.Anthropic(api_key=anthropic_api_key)
+
+# ── Feature order ─────────────────────────────────────────────────────────────
+
+# this has to match exactly what the model was trained on — don't reorder
 FEATURE_ORDER = [
     'age', 'bp', 'sg', 'al', 'su', 'rbc', 'pc', 'pcc', 'ba',
     'bgr', 'bu', 'sc', 'sod', 'pot', 'hemo', 'pcv', 'wbcc',
     'rbcc', 'htn', 'dm', 'cad', 'appet', 'pe', 'ane'
 ]
 
-# Define the input schema
+# ── Load model artifacts ──────────────────────────────────────────────────────
+
+# the trained random forest model and its median values for imputation
+# both saved from the notebook — if these files are missing the API won't start
+model    = joblib.load("ckd_model.pkl")
+medians  = joblib.load("feature_medians.pkl")
+
+# SHAP explainer wraps the model — TreeExplainer is the fast version for tree models
+explainer = shap.TreeExplainer(model)
+
+# ── Precompute global SHAP summary ────────────────────────────────────────────
+
+# we saved shap_values_test.npy from the notebook — it's the SHAP values for
+# all 80 test patients. we compute the global summary once at startup so every
+# request can use it without recomputing
+def build_shap_global_summary(shap_values_all: np.ndarray, top_n: int = 10) -> str:
+    arr      = shap_values_all.reshape(1, -1) if shap_values_all.ndim == 1 else shap_values_all
+    mean_abs = np.abs(arr).mean(axis=0)
+    ranked   = sorted(zip(FEATURE_ORDER, mean_abs), key=lambda x: x[1], reverse=True)[:top_n]
+
+    lines = ["Global feature importance (averaged across all test patients):"]
+    for i, (feat, imp) in enumerate(ranked, 1):
+        lines.append(f"  {i}. {feat}: mean |SHAP| = {float(imp):.4f}")
+
+    lines.append("\nDirection of top 3 features:")
+    for feat, _ in ranked[:3]:
+        idx      = FEATURE_ORDER.index(feat)
+        mean_val = float(arr[:, idx].mean())
+        direction = "generally increases CKD risk" if mean_val > 0 else "generally decreases CKD risk"
+        lines.append(f"  - {feat}: {direction} (mean SHAP = {mean_val:.4f})")
+
+    return "\n".join(lines)
+
+SHAP_VALUES_TEST    = np.load("shap_values_test.npy")       # shape (80, 24)
+SHAP_GLOBAL_SUMMARY = build_shap_global_summary(SHAP_VALUES_TEST)
+
+# ── Build LIME explainer ──────────────────────────────────────────────────────
+
+# LIME needs to know the training data distribution so it can generate
+# realistic perturbations around a test point — so we re-run the same
+# preprocessing pipeline from the notebook to get X_train back
+def build_lime_explainer() -> LimeTabularExplainer:
+    ckd = fetch_ucirepo(id=336)
+    df  = pd.concat([ckd.data.features, ckd.data.targets], axis=1)
+    df['class'] = df['class'].str.strip()
+
+    cat_cols   = df.select_dtypes(include='object').columns.tolist()
+    df_encoded = df.copy()
+    le         = LabelEncoder()
+
+    for col in cat_cols:
+        df_encoded[col] = df_encoded[col].fillna('missing')
+        df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
+
+    imputer    = KNNImputer(n_neighbors=5)
+    df_imputed = pd.DataFrame(imputer.fit_transform(df_encoded), columns=df.columns)
+
+    X = df_imputed.drop('class', axis=1)
+    y = df_imputed['class']
+
+    # same split params as the notebook so we get the same X_train
+    X_train, _, _, _ = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+
+    return LimeTabularExplainer(
+        training_data = X_train.values,
+        feature_names = FEATURE_ORDER,
+        class_names   = ['notckd', 'ckd'],
+        mode          = 'classification'
+    )
+
+# this takes ~15s on first startup because it fetches the dataset and runs KNN
+lime_explainer = build_lime_explainer()
+
+# ── Prompt templates ──────────────────────────────────────────────────────────
+
+PROMPT_FILE = Path(__file__).resolve().parent / "prompts.txt"
+
+# prompts.txt uses [patient] and [clinic] section headers
+# each section is a Python string.Template with $variable placeholders
+def load_prompt_templates() -> dict:
+    raw_text     = PROMPT_FILE.read_text(encoding="utf-8")
+    templates    = {}
+    current_name = None
+    current_lines = []
+
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if current_name:
+                templates[current_name] = "\n".join(current_lines).strip()
+            current_name  = stripped.strip("[]").lower()
+            current_lines = []
+        elif current_name is not None:
+            current_lines.append(line)
+
+    if current_name:
+        templates[current_name] = "\n".join(current_lines).strip()
+
+    return templates
+
+PROMPT_TEMPLATES = load_prompt_templates()
+
+def render_prompt(template_name: str, **kwargs) -> str:
+    template_text = PROMPT_TEMPLATES.get(template_name)
+    if template_text is None:
+        raise ValueError(
+            f"Prompt template '{template_name}' not found in {PROMPT_FILE}"
+        )
+    return Template(template_text).substitute(**kwargs)
+
+# ── Enums and schemas ─────────────────────────────────────────────────────────
+
+class ReportView(str, Enum):
+    patient = "patient"
+    clinic  = "clinic"
+
 class PatientData(BaseModel):
-    # Mandatory fields
-    hemo: float = Field(..., description="Haemoglobin level (g/dL)", example=11.2)
-    sg: float = Field(..., description="Specific gravity", example=1.015)
-    sc: float = Field(..., description="Serum creatinine (mg/dL)", example=1.2)
-    al: float = Field(..., description="Albumin (0-5 scale)", example=1.0)
-    pcv: float = Field(..., description="Packed cell volume (%)", example=38.0)
+    # these five are mandatory — the model leans on them heavily
+    # (hemo and sg are the two strongest predictors)
+    hemo: float = Field(..., description="Haemoglobin level (g/dL)")
+    sg:   float = Field(..., description="Specific gravity")
+    sc:   float = Field(..., description="Serum creatinine (mg/dL)")
+    al:   float = Field(..., description="Albumin (0-5 scale)")
+    pcv:  float = Field(..., description="Packed cell volume (%)")
 
-    # Strongly recommended
-    age: Optional[float] = Field(None, description="Age in years")
-    bp: Optional[float] = Field(None, description="Blood pressure (mm/Hg)")
-    bgr: Optional[float] = Field(None, description="Blood glucose random (mg/dL)")
-    bu: Optional[float] = Field(None, description="Blood urea (mg/dL)")
-    sod: Optional[float] = Field(None, description="Sodium (mEq/L)")
-    htn: Optional[int] = Field(None, description="Hypertension (0=no, 1=yes)")
-    dm: Optional[int] = Field(None, description="Diabetes mellitus (0=no, 1=yes)")
+    # worth providing if available — these come up in the model fairly often
+    age:  Optional[float] = Field(None, description="Age in years")
+    bp:   Optional[float] = Field(None, description="Blood pressure (mm/Hg)")
+    bgr:  Optional[float] = Field(None, description="Blood glucose random (mg/dL)")
+    bu:   Optional[float] = Field(None, description="Blood urea (mg/dL)")
+    sod:  Optional[float] = Field(None, description="Sodium (mEq/L)")
+    htn:  Optional[int]   = Field(None, description="Hypertension (0=no, 1=yes)")
+    dm:   Optional[int]   = Field(None, description="Diabetes mellitus (0=no, 1=yes)")
 
-    # Optional
-    su: Optional[float] = Field(None, description="Sugar (0-5 scale)")
-    rbc: Optional[int] = Field(None, description="Red blood cells in urine (0=normal, 1=abnormal)")
-    pc: Optional[int] = Field(None, description="Pus cells (0=normal, 1=abnormal)")
-    pcc: Optional[int] = Field(None, description="Pus cell clumps (0=notpresent, 1=present)")
-    ba: Optional[int] = Field(None, description="Bacteria (0=notpresent, 1=present)")
-    pot: Optional[float] = Field(None, description="Potassium (mEq/L)")
-    wbcc: Optional[float] = Field(None, description="White blood cell count (cells/cumm)")
-    rbcc: Optional[float] = Field(None, description="Red blood cell count (millions/cmm)")
-    cad: Optional[int] = Field(None, description="Coronary artery disease (0=no, 1=yes)")
-    appet: Optional[int] = Field(None, description="Appetite (0=good, 1=poor)")
-    pe: Optional[int] = Field(None, description="Pedal edema (0=no, 1=yes)")
-    ane: Optional[int] = Field(None, description="Anaemia (0=no, 1=yes)")
+    # less critical but included for completeness
+    su:    Optional[float] = Field(None, description="Sugar (0-5 scale)")
+    rbc:   Optional[int]   = Field(None, description="Red blood cells in urine (0=normal, 1=abnormal)")
+    pc:    Optional[int]   = Field(None, description="Pus cells (0=normal, 1=abnormal)")
+    pcc:   Optional[int]   = Field(None, description="Pus cell clumps (0=notpresent, 1=present)")
+    ba:    Optional[int]   = Field(None, description="Bacteria (0=notpresent, 1=present)")
+    pot:   Optional[float] = Field(None, description="Potassium (mEq/L)")
+    wbcc:  Optional[float] = Field(None, description="White blood cell count (cells/cumm)")
+    rbcc:  Optional[float] = Field(None, description="Red blood cell count (millions/cmm)")
+    cad:   Optional[int]   = Field(None, description="Coronary artery disease (0=no, 1=yes)")
+    appet: Optional[int]   = Field(None, description="Appetite (0=good, 1=poor)")
+    pe:    Optional[int]   = Field(None, description="Pedal edema (0=no, 1=yes)")
+    ane:   Optional[int]   = Field(None, description="Anaemia (0=no, 1=yes)")
 
-def impute_missing(patient_dict):
-    """Fill missing optional fields with column medians from training data."""
-    # Load saved training medians (save these from your notebook)
-    medians = joblib.load("feature_medians.pkl")
-    
+    model_config = {"json_schema_extra": {"example": {
+        "hemo": 11.2, "sg": 1.015, "sc": 1.2, "al": 1.0, "pcv": 38.0
+    }}}
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def impute_missing(patient_dict: dict) -> dict:
+    # fill any None values with the median from training
+    # medians is loaded once at startup so no file I/O here
     for feat in FEATURE_ORDER:
         if patient_dict.get(feat) is None:
             patient_dict[feat] = medians[feat]
-    
     return patient_dict
 
-@app.post("/predict")
-def predict(patient: PatientData):
-    # Convert to dict and impute missing values
-    data = patient.dict()
-    data = impute_missing(data)
 
-    # Build dataframe in correct feature order
-    df_input = pd.DataFrame([data])[FEATURE_ORDER]
+def extract_shap(df_input: pd.DataFrame) -> np.ndarray:
+    raw = explainer.shap_values(df_input)
 
-    # Predict
-    prediction = int(model.predict(df_input)[0])        # force plain Python int
-    proba = model.predict_proba(df_input)[0]            # [prob_class_0, prob_class_1]
-    ckd_probability = float(proba[1])                   # always index 1 for CKD
-
-    outcome = "CKD detected" if prediction == 1 else "No CKD detected"
-    confidence = ckd_probability if prediction == 1 else float(proba[0])
-
-    # Force completely flat regardless of what SHAP returns
-    shap_vals_raw = explainer.shap_values(df_input)
-    shap_vals = np.array(shap_vals_raw).flatten()
-    
-    # Pick the right 24 values depending on model type
-    if isinstance(shap_vals_raw, list):
-        # RF returns shape (2, 1, 24) — take second class (CKD)
-        shap_vals = np.array(shap_vals_raw[1]).flatten()[:len(FEATURE_ORDER)]
+    if isinstance(raw, list):
+        # random forest returns a list — one array per class
+        # index 1 is the CKD class, which is what we care about
+        vals = np.array(raw[1]).flatten()
     else:
-        # XGB returns shape (1, 24)
-        shap_vals = np.array(shap_vals_raw).flatten()[:len(FEATURE_ORDER)]
-    
-    # Verify before sorting
-    print("final shap_vals shape:", shap_vals.shape)  # must be (24,)
-    print("sample value:", shap_vals[0], type(shap_vals[0]))
-    
-    feature_list = list(FEATURE_ORDER)
-    shap_list = [float(v) for v in shap_vals]          # explicitly cast every element
-    input_list = [float(v) for v in df_input.iloc[0].values]
-    
-    pairs = sorted(
-        zip(feature_list, shap_list, input_list),
-        key=lambda x: abs(x[1]),                        # x[1] is now guaranteed float
-        reverse=True
-    )[:5]
+        # xgboost returns a single array
+        vals = np.array(raw).flatten()
 
-    shap_lines = [
-    f"- {f}: value={float(v):.2f}, contribution={float(s):.3f} "
-    f"({'higher' if float(s) > 0 else 'lower'} risk)"
-    for f, s, v in pairs
+    # slice to FEATURE_ORDER length in case of any extra columns
+    return vals[:len(FEATURE_ORDER)]
+
+
+def extract_lime(df_input: pd.DataFrame, top_n: int = 5) -> list:
+    # runs LIME on this specific patient — purely local, ignores all other patients
+    exp = lime_explainer.explain_instance(
+        df_input.iloc[0].values,
+        model.predict_proba,
+        num_features=top_n
+    )
+    return exp.as_list()
+
+
+def build_lime_local_summary(lime_pairs: list, outcome: str, confidence: float) -> str:
+    # format the LIME output into a readable string for the prompt
+    lines = [
+        "Local explanation (specific to this patient):",
+        f"  Prediction : {outcome} (confidence: {confidence:.1%})",
+        "  Feature conditions that influenced this prediction:"
     ]
+    for condition, weight in lime_pairs:
+        direction = "toward CKD" if weight > 0 else "away from CKD"
+        lines.append(f"  - {condition}: weight = {weight:.4f} ({direction})")
+    return "\n".join(lines)
 
-    # Claude NL explanation
-    prompt = f"""You are a senior nephrologist reviewing an AI CKD risk assessment.
-Patient prediction: {outcome} (confidence: {confidence:.1%})
-Top contributing factors:
-{chr(10).join(shap_lines)}
-Write a 3-4 sentence clinical summary in plain English. No ML terminology."""
+# ── Prompt builders ───────────────────────────────────────────────────────────
 
-    message = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}]
+def build_patient_prompt(outcome: str, confidence: float, ckd_probability: float,
+                         pairs: list, shap_lines: list) -> str:
+    top_features  = [f for f, s, v in pairs[:3]]
+    plain_outcome = (
+        "your kidneys may be showing signs of chronic kidney disease"
+        if "CKD detected" in outcome
+        else "your kidneys appear to be healthy"
     )
 
+    # variable names here must match the $placeholders in prompts.txt [patient] section
+    return render_prompt(
+        "patient",
+        plain_outcome = plain_outcome,
+        confidence    = f"{confidence:.1%}",
+        top_features  = ", ".join(top_features),
+        shap_lines    = "\n".join(shap_lines)
+    )
+
+
+def build_clinic_prompt(outcome: str, confidence: float, ckd_probability: float,
+                        pairs: list, shap_lines: list,
+                        lime_local: str, shap_global: str) -> str:
+    top_feature_names   = [f for f, s, v in pairs]
+    feature_lookup_list = "\n".join([f"- {f}" for f in top_feature_names])
+    patient_values      = "\n".join([
+        f"- {f}: {float(v):.2f} (SHAP contribution: {float(s):+.3f})"
+        for f, s, v in pairs
+    ])
+
+    # variable names here must match the $placeholders in prompts.txt [clinic] section
+    return render_prompt(
+        "clinic",
+        outcome             = outcome,
+        confidence          = f"{confidence:.1%}",
+        ckd_probability     = f"{ckd_probability:.1%}",
+        feature_lookup_list = feature_lookup_list,
+        patient_values      = patient_values,
+        lime_local          = lime_local,
+        shap_global         = shap_global
+    )
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/")
+def root():
     return {
-        "prediction": outcome,
-        "confidence": round(confidence, 4),
-        "ckd_probability": round(ckd_probability, 4),
-        "shap_contributions": {
-            f: round(float(s), 4)
-            for f, s, _ in pairs
-        },
-        "explanation": message.content[0].text
+        "name"   : "CKD Risk Prediction API",
+        "version": "1.0.0",
+        "status" : "running",
+        "docs"   : "/docs",
+        "health" : "/health",
+        "predict": "/predict"
     }
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status"        : "ok",
+        "api_key_loaded": anthropic_api_key is not None
+    }
+
+
+@app.post("/predict")
+def predict(patient: PatientData, view: ReportView = ReportView.patient):
+    try:
+        # 1 — impute missing optional fields using training medians
+        data     = patient.model_dump()
+        data     = impute_missing(data)
+        df_input = pd.DataFrame([data])[FEATURE_ORDER]
+
+        # 2 — run the model
+        prediction      = int(model.predict(df_input)[0])
+        proba           = model.predict_proba(df_input)[0]
+        ckd_probability = float(proba[1])
+        outcome         = "CKD detected" if prediction == 1 else "No CKD detected"
+        confidence      = ckd_probability if prediction == 1 else float(proba[0])
+
+        # 3 — SHAP local explanation for this patient
+        # note: global summary is precomputed at startup as SHAP_GLOBAL_SUMMARY
+        # this per-request call gives us the local contribution of each feature
+        # for this specific patient, which goes into the pairs/shap_lines below
+        shap_vals_raw = explainer.shap_values(df_input)
+        if isinstance(shap_vals_raw, list):
+            shap_vals = np.array(shap_vals_raw[1]).flatten()[:len(FEATURE_ORDER)]
+        else:
+            shap_vals = np.array(shap_vals_raw).flatten()[:len(FEATURE_ORDER)]
+
+        feature_list = list(FEATURE_ORDER)
+        shap_list    = [float(v) for v in shap_vals]
+        input_list   = [float(v) for v in df_input.iloc[0].values]
+
+        # top 5 features by absolute SHAP contribution for this patient
+        pairs = sorted(
+            zip(feature_list, shap_list, input_list),
+            key=lambda x: abs(x[1]),
+            reverse=True
+        )[:5]
+
+        shap_lines = [
+            f"- {f}: value={float(v):.2f}, contribution={float(s):.3f} "
+            f"({'higher' if float(s) > 0 else 'lower'} risk)"
+            for f, s, v in pairs
+        ]
+
+        # 4 — LIME local explanation
+        # this is purely local — explains why the model made this specific
+        # decision for this patient, independent of all other patients
+        lime_pairs = extract_lime(df_input, top_n=5)
+        lime_local = build_lime_local_summary(lime_pairs, outcome, confidence)
+
+        # 5 — build prompt and call Claude
+        # patient view: plain language, no thinking
+        # clinic view: structured clinical report, extended thinking enabled
+        if view == ReportView.patient:
+            prompt_text = build_patient_prompt(
+                outcome         = outcome,
+                confidence      = confidence,
+                ckd_probability = ckd_probability,
+                pairs           = pairs,
+                shap_lines      = shap_lines
+            )
+            message = client.messages.create(
+                model      = "claude-sonnet-4-20250514",
+                max_tokens = 400,
+                messages   = [{"role": "user", "content": prompt_text}]
+            )
+
+        else:  # clinic
+            prompt_text = build_clinic_prompt(
+                outcome         = outcome,
+                confidence      = confidence,
+                ckd_probability = ckd_probability,
+                pairs           = pairs,
+                shap_lines      = shap_lines,
+                lime_local      = lime_local,        # local explanation for this patient
+                shap_global     = SHAP_GLOBAL_SUMMARY  # population-level context
+            )
+            message = client.messages.create(
+                model      = "claude-sonnet-4-20250514",
+                max_tokens = 16000,
+                thinking   = {"type": "enabled", "budget_tokens": 10000},
+                messages   = [{"role": "user", "content": prompt_text}]
+            )
+
+        # 6 — extract thinking and response from content blocks
+        # when thinking is enabled, content has multiple blocks —
+        # we pull them out separately so the UI can display them differently
+        thinking_text    = ""
+        explanation_text = ""
+
+        for block in message.content:
+            if block.type == "thinking":
+                thinking_text    = block.thinking
+            elif block.type == "text":
+                explanation_text += block.text
+
+        return {
+            "prediction"        : outcome,
+            "confidence"        : round(confidence, 4),
+            "ckd_probability"   : round(ckd_probability, 4),
+            "view"              : view.value,
+            "shap_contributions": {f: round(float(s), 4) for f, s, _ in pairs},
+            "lime_contributions": {cond: round(float(w), 4) for cond, w in lime_pairs},
+            "explanation"       : explanation_text,
+            "thinking"          : thinking_text   # empty string for patient view
+        }
+
+    except Exception as exc:
+        # print the full traceback to the uvicorn terminal for debugging
+        print(traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Prediction failed", "detail": str(exc)}
+        )

@@ -46,159 +46,32 @@ Critical rules:
 - Flowing prose only, no bullet points or headers
 
 [clinic]
-def build_clinic_prompt(outcome, confidence, ckd_probability, pairs, shap_lines, lime_local, shap_global):
+You are a clinical decision support system generating a structured nephrology case review. Use the data below to produce a concise, clinically relevant report for a physician.
 
-    top_feature_names = [f for f, s, v in pairs]
-    feature_lookup_list = "\n".join([f"- {f}" for f in top_feature_names])
-    
-    # Build actual patient values string for reference
-    patient_values = "\n".join([
-        f"- {f}: {float(v):.2f} (SHAP contribution: {float(s):+.3f})"
-        for f, s, v in pairs
-    ])
-
-    return f"""You are a clinical decision support system generating a structured 
-nephrology case review. You must use your medical reference tools extensively 
-before writing anything. Follow these steps in order:
-
-STEP 1 — FEATURE LOOKUP (do this for every feature listed)
-For each of the following features, use your tools to retrieve:
-a) The full clinical name of the abbreviation
-b) The established normal reference range
-c) What an abnormal value indicates clinically
-d) Its established association with CKD progression
+Prediction      : ${outcome}
+Confidence      : ${confidence}
+CKD probability : ${ckd_probability}
 
 Features to look up:
-{feature_lookup_list}
+${feature_lookup_list}
 
-STEP 2 — LITERATURE
-Search PubMed for: "chronic kidney disease {top_feature_names[0]} biomarker prediction"
-Retrieve the most recent relevant paper (2022 or later).
-Note: title, authors, journal, year, and one sentence on its finding.
+Patient values:
+${patient_values}
 
-STEP 3 — CODING
-Look up the precise ICD-10-CM code for this prediction:
-Prediction: {outcome}
-Retrieve: full code, full description, and the correct coding category.
+Global SHAP context:
+${shap_global}
 
-STEP 4 — CLINICAL TRIALS (only if CKD detected)
-Search ClinicalTrials.gov for active recruiting trials matching:
-- Condition: Chronic Kidney Disease
-- Intervention type: any
-Retrieve: trial name, NCT number, phase, eligibility criteria summary.
+Local LIME explanation:
+${lime_local}
 
-STEP 5 — DRUG INTERACTIONS
-Search FDA drug database for the top 3 nephrotoxic drugs that would be 
-contraindicated or require dose adjustment for a patient with this profile.
-
-Now produce a structured clinical report using EXACTLY this format:
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NEPHROLOGY AI DECISION SUPPORT REPORT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-PREDICTION SUMMARY
-- Prediction: {outcome}
-- Model confidence: {confidence:.1%}
-- CKD probability score: {ckd_probability:.1%}
-- Presentation type: [typical / atypical — compare LIME drivers against global SHAP]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BIOMARKER ANALYSIS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[For each of the top 5 features, produce a block in this exact format:]
-
-▸ [FULL CLINICAL NAME] ([abbreviation])
-  Patient value    : [value with units retrieved from MCP]
-  Reference range  : [range retrieved from MCP lookup]
-  Status           : [ELEVATED / LOW / NORMAL / BORDERLINE]
-  Clinical meaning : [what this value indicates, from MCP lookup]
-  CKD relevance    : [its role in CKD, from MCP lookup]
-  AI contribution  : [pushed toward CKD / pushed away from CKD] 
-                     (SHAP: {{}}, LIME weight: {{}})
-  ⚠ Flag           : [only if LIME direction contradicts clinical expectation — 
-                      state the contradiction explicitly]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CLINICAL CONTEXT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Global model context (what typically drives CKD predictions):
-{shap_global}
-
-This patient vs typical presentation:
-[Compare this patient's LIME drivers against the global SHAP ranking. 
-State explicitly which drivers match, which don't, and what that suggests clinically.]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SUPPORTING LITERATURE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[Paper title]
-Authors: [names]
-Journal: [journal name], [year]
-Finding: [one sentence directly relevant to this patient's top biomarker]
-Relevance to this case: [one sentence connecting the paper to this patient's values]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CLINICAL CODING
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-ICD-10-CM Code : [code retrieved from MCP]
-Description    : [full description retrieved from MCP]
-Category       : [category retrieved from MCP]
-Staging note   : [if CKD, note that staging (G1-G5) requires GFR confirmation 
-                  beyond what this screening provides]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ACTIVE CLINICAL TRIALS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[Only include if CKD detected, otherwise write "Not applicable — no CKD detected"]
-
-Trial name     : [retrieved from ClinicalTrials.gov]
-NCT number     : [NCT number]
-Phase          : [phase]
-Status         : Actively recruiting
-Key criteria   : [brief eligibility summary]
-Relevance      : [one sentence on why this trial is relevant to this patient's profile]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CONTRAINDICATED / HIGH-RISK MEDICATIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[For each of 3 nephrotoxic drugs retrieved from FDA lookup:]
-▸ [Drug name]: [one sentence on why it is contraindicated or requires adjustment 
-  in CKD, with dose adjustment guidance if available]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CLINICAL RECOMMENDATION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Urgency        : [ROUTINE / URGENT / EMERGENT]
-Action         : [specific next step — referral timeline, repeat testing, 
-                  specialist type]
-Monitoring     : [which biomarkers to retest and suggested interval]
-Disclaimer     : This report is AI-generated and intended to support, not replace,
-                 clinical judgement. All findings require confirmation by a 
-                 qualified nephrologist.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Patient data used:
-{patient_values}
-
-LIME local explanation:
-{lime_local}
+Write a concise clinical note for a physician that includes:
+- The predicted risk and confidence
+- The top contributing lab values and why they matter
+- How this patient's local drivers compare to the global SHAP context
+- Specific follow-up considerations or next steps
 
 Critical rules:
-- Every reference range and clinical definition must come from your MCP tool lookup,
-  not from memory — if a lookup fails, say so explicitly rather than substituting 
-  a guess
-- The ⚠ Flag field is mandatory whenever a LIME direction contradicts the 
-  established clinical meaning of that biomarker
-- ICD-10 code must come from the ICD-10 MCP lookup, not from memory
-- PubMed citation must be a real paper retrieved during this session
-- Do not abbreviate or skip any section
-- The disclaimer must appear verbatim"""
+- Do not mention AI, machine learning, SHAP, or LIME by name
+- Keep it factual and professional
+- Do not provide patient-facing reassurance
+- Keep the response under five short paragraphs
