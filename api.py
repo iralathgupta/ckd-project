@@ -1,4 +1,5 @@
 import os
+import asyncio
 import traceback
 import joblib
 import numpy as np
@@ -19,6 +20,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.impute import KNNImputer
 from ucimlrepo import fetch_ucirepo
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -278,24 +282,85 @@ def build_patient_prompt(outcome: str, confidence: float, ckd_probability: float
 def build_clinic_prompt(outcome: str, confidence: float, ckd_probability: float,
                         pairs: list, shap_lines: list,
                         lime_local: str, shap_global: str) -> str:
-    top_feature_names   = [f for f, s, v in pairs]
-    feature_lookup_list = "\n".join([f"- {f}" for f in top_feature_names])
-    patient_values      = "\n".join([
-        f"- {f}: {float(v):.2f} (SHAP contribution: {float(s):+.3f})"
+    patient_values = "\n".join([
+        f"- {f}: {float(v):.2f} (contribution: {float(s):+.3f})"
         for f, s, v in pairs
     ])
 
-    # variable names here must match the $placeholders in prompts.txt [clinic] section
     return render_prompt(
         "clinic",
-        outcome             = outcome,
-        confidence          = f"{confidence:.1%}",
-        ckd_probability     = f"{ckd_probability:.1%}",
-        feature_lookup_list = feature_lookup_list,
-        patient_values      = patient_values,
-        lime_local          = lime_local,
-        shap_global         = shap_global
+        outcome         = outcome,
+        confidence      = f"{confidence:.1%}",
+        ckd_probability = f"{ckd_probability:.1%}",
+        patient_values  = patient_values,
+        lime_local      = lime_local,
+        shap_global     = shap_global
     )
+
+
+async def generate_clinic_report(prompt_text: str) -> tuple[str, str]:
+    server_params = StdioServerParameters(
+        command = "healthcare-mcp",
+        args    = []
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            tools_response = await session.list_tools()
+            tools = [
+                {
+                    "name"        : t.name,
+                    "description" : t.description or "",
+                    "input_schema": t.inputSchema or {"type": "object", "properties": {}}
+                }
+                for t in tools_response.tools
+            ]
+
+            messages      = [{"role": "user", "content": prompt_text}]
+            thinking_text = ""
+
+            while True:
+                response = await asyncio.to_thread(
+                    client.messages.create,
+                    model    = "claude-sonnet-4-6",
+                    max_tokens = 16000,
+                    thinking = {"type": "enabled", "budget_tokens": 10000},
+                    tools    = tools,
+                    messages = messages
+                )
+
+                for block in response.content:
+                    if block.type == "thinking":
+                        thinking_text += block.thinking
+
+                if response.stop_reason != "tool_use":
+                    explanation = "".join(
+                        b.text for b in response.content if b.type == "text"
+                    )
+                    return explanation, thinking_text
+
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        try:
+                            result      = await session.call_tool(block.name, block.input)
+                            content_str = "\n".join(
+                                c.text if hasattr(c, "text") else str(c)
+                                for c in result.content
+                            )
+                        except Exception as exc:
+                            content_str = f"Tool error: {exc}"
+
+                        tool_results.append({
+                            "type"        : "tool_result",
+                            "tool_use_id" : block.id,
+                            "content"     : content_str
+                        })
+
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user",      "content": tool_results})
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -320,7 +385,7 @@ def health():
 
 
 @app.post("/predict")
-def predict(patient: PatientData, view: ReportView = ReportView.patient):
+async def predict(patient: PatientData, view: ReportView = ReportView.patient):
     try:
         # 1 — impute missing optional fields using training medians
         data     = patient.model_dump()
@@ -378,11 +443,14 @@ def predict(patient: PatientData, view: ReportView = ReportView.patient):
                 pairs           = pairs,
                 shap_lines      = shap_lines
             )
-            message = client.messages.create(
-                model      = "claude-sonnet-4-20250514",
+            response         = await asyncio.to_thread(
+                client.messages.create,
+                model      = "claude-haiku-4-5-20251001",
                 max_tokens = 400,
                 messages   = [{"role": "user", "content": prompt_text}]
             )
+            explanation_text = response.content[0].text
+            thinking_text    = ""
 
         else:  # clinic
             prompt_text = build_clinic_prompt(
@@ -391,27 +459,10 @@ def predict(patient: PatientData, view: ReportView = ReportView.patient):
                 ckd_probability = ckd_probability,
                 pairs           = pairs,
                 shap_lines      = shap_lines,
-                lime_local      = lime_local,        # local explanation for this patient
-                shap_global     = SHAP_GLOBAL_SUMMARY  # population-level context
+                lime_local      = lime_local,
+                shap_global     = SHAP_GLOBAL_SUMMARY
             )
-            message = client.messages.create(
-                model      = "claude-sonnet-4-20250514",
-                max_tokens = 16000,
-                thinking   = {"type": "enabled", "budget_tokens": 10000},
-                messages   = [{"role": "user", "content": prompt_text}]
-            )
-
-        # 6 — extract thinking and response from content blocks
-        # when thinking is enabled, content has multiple blocks —
-        # we pull them out separately so the UI can display them differently
-        thinking_text    = ""
-        explanation_text = ""
-
-        for block in message.content:
-            if block.type == "thinking":
-                thinking_text    = block.thinking
-            elif block.type == "text":
-                explanation_text += block.text
+            explanation_text, thinking_text = await generate_clinic_report(prompt_text)
 
         return {
             "prediction"        : outcome,

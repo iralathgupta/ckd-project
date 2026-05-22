@@ -20,6 +20,27 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500&display=swap');
 
+    :root {
+        --cream:        #F7F5F0;
+        --dark:         #1A1A18;
+        --dark-hover:   #2E2E2B;
+        --sidebar-text: #C8C5BC;
+        --border:       #E5E2DA;
+        --muted:        #7A7870;
+        --rust:         #D30000;
+        --green:        #2E7D52;
+        --rust-bg:      #FDF2EE;
+        --rust-border:  #E8C4B4;
+        --green-bg:     #EFF7F3;
+        --green-border: #B4D9C4;
+        --bar-bg:       #F0EDE6;
+        --input-bg:     #FAFAF8;
+        --text:         #2C2C2A;
+        --text-dim:     #4A4A48;
+        --grey-mid:     #666666;
+        --grey-light:   #888888;
+    }
+
     html, body, [class*="css"] {
         font-family: 'DM Sans', sans-serif;
     }
@@ -31,24 +52,24 @@ st.markdown("""
 
     /* Page background */
     .stApp {
-        background-color: #F7F5F0;
+        background-color: var(--cream);
     }
 
     /* Sidebar */
     section[data-testid="stSidebar"] {
-        background-color: #1A1A18;
-        border-right: 1px solid #2E2E2B;
+        background-color: var(--dark);
+        border-right: 1px solid var(--dark-hover);
     }
     section[data-testid="stSidebar"] * {
-        color: #C8C5BC !important;
+        color: var(--sidebar-text) !important;
     }
     section[data-testid="stSidebar"] .stRadio label {
-        color: #C8C5BC !important;
+        color: var(--sidebar-text) !important;
     }
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
     section[data-testid="stSidebar"] h3 {
-        color: #F7F5F0 !important;
+        color: var(--cream) !important;
         font-family: 'DM Serif Display', serif !important;
     }
 
@@ -56,21 +77,21 @@ st.markdown("""
     .page-title {
         font-family: 'DM Serif Display', serif;
         font-size: 2.4rem;
-        color: #1A1A18;
+        color: var(--dark);
         margin: 0 0 0.25rem;
         line-height: 1.1;
     }
     .page-subtitle {
         font-size: 0.95rem;
-        color: #7A7870;
+        color: var(--muted);
         margin-bottom: 2rem;
         font-weight: 300;
     }
 
     /* Cards */
     .card {
-        background: #FFFFFF;
-        border: 1px solid #E5E2DA;
+        background: white;
+        border: 1px solid var(--border);
         border-radius: 12px;
         padding: 1.5rem;
         margin-bottom: 1rem;
@@ -78,25 +99,25 @@ st.markdown("""
     .card-title {
         font-family: 'DM Serif Display', serif;
         font-size: 1.1rem;
-        color: #1A1A18;
+        color: var(--dark);
         margin-bottom: 1rem;
         padding-bottom: 0.6rem;
-        border-bottom: 1px solid #E5E2DA;
+        border-bottom: 1px solid var(--border);
     }
 
     /* Result banner */
     .result-ckd {
-        background: #FDF2EE;
-        border: 1px solid #E8C4B4;
-        border-left: 4px solid #C45C2E;
+        background: var(--rust-bg);
+        border: 1px solid var(--rust-border);
+        border-left: 4px solid var(--rust);
         border-radius: 8px;
         padding: 1rem 1.25rem;
         margin-bottom: 1rem;
     }
     .result-healthy {
-        background: #EFF7F3;
-        border: 1px solid #B4D9C4;
-        border-left: 4px solid #2E7D52;
+        background: var(--green-bg);
+        border: 1px solid var(--green-border);
+        border-left: 4px solid var(--green);
         border-radius: 8px;
         padding: 1rem 1.25rem;
         margin-bottom: 1rem;
@@ -108,7 +129,7 @@ st.markdown("""
     }
     .result-conf {
         font-size: 0.85rem;
-        color: #7A7870;
+        color: var(--muted);
         margin: 0;
     }
 
@@ -120,8 +141,8 @@ st.markdown("""
     }
     .metric-box {
         flex: 1;
-        background: #F7F5F0;
-        border: 1px solid #E5E2DA;
+        background: var(--cream);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 0.85rem 1rem;
         text-align: center;
@@ -129,13 +150,13 @@ st.markdown("""
     .metric-value {
         font-family: 'DM Serif Display', serif;
         font-size: 1.6rem;
-        color: #1A1A18;
+        color: var(--dark);
         line-height: 1;
         margin-bottom: 0.2rem;
     }
     .metric-label {
         font-size: 0.75rem;
-        color: #7A7870;
+        color: var(--muted);
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
@@ -150,7 +171,7 @@ st.markdown("""
     .shap-feat {
         width: 80px;
         font-size: 0.8rem;
-        color: #1A1A18;
+        color: var(--dark);
         text-align: right;
         flex-shrink: 0;
         font-family: 'DM Sans', monospace;
@@ -158,7 +179,7 @@ st.markdown("""
     .shap-bar-wrap {
         flex: 1;
         height: 20px;
-        background: #F0EDE6;
+        background: var(--bar-bg);
         border-radius: 3px;
         position: relative;
         overflow: hidden;
@@ -168,7 +189,7 @@ st.markdown("""
         left: 50%;
         top: 0;
         height: 100%;
-        background: #C45C2E;
+        background: var(--rust);
         border-radius: 0 3px 3px 0;
     }
     .shap-bar-neg {
@@ -176,33 +197,33 @@ st.markdown("""
         right: 50%;
         top: 0;
         height: 100%;
-        background: #2E7D52;
+        background: var(--green);
         border-radius: 3px 0 0 3px;
     }
     .shap-val {
         width: 55px;
         font-size: 0.78rem;
-        color: #7A7870;
+        color: var(--muted);
         flex-shrink: 0;
         font-family: 'DM Sans', monospace;
     }
 
     /* Explanation text */
     .explanation-box {
-        background: #F7F5F0;
-        border: 1px solid #E5E2DA;
+        background: var(--cream);
+        border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1.25rem;
         font-size: 0.95rem;
         line-height: 1.75;
-        color: #2C2C2A;
+        color: var(--text);
         white-space: pre-wrap;
     }
 
     /* Divider */
     .section-divider {
         border: none;
-        border-top: 1px solid #E5E2DA;
+        border-top: 1px solid var(--border);
         margin: 1.5rem 0;
     }
 
@@ -210,15 +231,15 @@ st.markdown("""
     .stTextArea textarea {
         font-family: 'DM Sans', monospace !important;
         font-size: 0.82rem !important;
-        background: #FAFAF8 !important;
-        border: 1px solid #E5E2DA !important;
+        background: var(--input-bg) !important;
+        border: 1px solid var(--border) !important;
         border-radius: 8px !important;
     }
 
     /* Buttons */
     .stButton button {
-        background-color: #1A1A18 !important;
-        color: #F7F5F0 !important;
+        background-color: var(--dark) !important;
+        color: var(--cream) !important;
         border: none !important;
         border-radius: 8px !important;
         font-family: 'DM Sans', sans-serif !important;
@@ -229,7 +250,7 @@ st.markdown("""
         transition: background 0.2s !important;
     }
     .stButton button:hover {
-        background-color: #2E2E2B !important;
+        background-color: var(--dark-hover) !important;
     }
 
     /* Slider */
@@ -250,16 +271,27 @@ st.markdown("""
         font-size: 0.8rem;
         font-weight: 500;
     }
-    .gt-ckd     { background: #FDF2EE; color: #C45C2E; border: 1px solid #E8C4B4; }
-    .gt-healthy { background: #EFF7F3; color: #2E7D52; border: 1px solid #B4D9C4; }
+    .gt-ckd     { background: var(--rust-bg);  color: var(--rust);  border: 1px solid var(--rust-border);  }
+    .gt-healthy { background: var(--green-bg); color: var(--green); border: 1px solid var(--green-border); }
 
     /* Mode toggle label */
     .mode-label {
         font-size: 0.7rem;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        color: #7A7870;
+        color: var(--muted);
         margin-bottom: 0.4rem;
+    }
+
+    /* Reasoning expander */
+    details[data-testid="stExpander"] summary:hover,
+    details[data-testid="stExpander"] summary:hover p,
+    details[data-testid="stExpander"] summary:hover svg {
+        color: var(--dark) !important;
+        fill:  var(--dark) !important;
+    }
+    details[data-testid="stExpander"] [data-testid="stMarkdownContainer"] * {
+        font-size: inherit !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -332,7 +364,7 @@ with st.sidebar:
 
     st.markdown("### View Mode")
     st.markdown(
-        '<p style="font-size:0.78rem;color:#888;margin-bottom:0.4rem">'
+        '<p style="font-size:0.78rem;color:var(--grey-light);margin-bottom:0.4rem">'
         'Patient view uses plain language. Clinic view includes ICD-10 codes, '
         'PubMed citations, and drug contraindications via MCP.'
         '</p>',
@@ -358,12 +390,12 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown(
-        '<p style="font-size:0.75rem;color:#666;line-height:1.6">'
+        '<p style="font-size:0.75rem;color:var(--grey-mid);line-height:1.6">'
         'Model: Random Forest<br>'
         'XAI: SHAP (global) + LIME (local)<br>'
         'NL Reasoning: Claude Sonnet<br>'
         'Dataset: UCI CKD (400 samples)<br>'
-        'MCP: healthcare-mcp-public server by Cicatriiz'
+        'MCP: healthcare-mcp server by cicatriz'
         '</p>',
         unsafe_allow_html=True
     )
@@ -405,7 +437,7 @@ if input_mode == "test":
             actual_label = "CKD" if actual_raw == 1 else "No CKD"
             badge_class  = "gt-ckd" if actual_raw == 1 else "gt-healthy"
             st.markdown(
-                f'<p style="font-size:0.75rem;color:#7A7870;margin-bottom:0.3rem">Ground truth</p>'
+                f'<p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.3rem">Ground truth</p>'
                 f'<span class="gt-badge {badge_class}">{actual_label}</span>',
                 unsafe_allow_html=True
             )
@@ -425,7 +457,7 @@ if input_mode == "test":
 
 elif input_mode == "manual":
     st.markdown(
-        '<p style="font-size:0.85rem;color:#7A7870;margin-bottom:0.5rem">'
+        '<p style="font-size:0.85rem;color:var(--muted);margin-bottom:0.5rem">'
         'Enter patient biomarkers as JSON. Mandatory fields: '
         '<code>hemo</code>, <code>sg</code>, <code>sc</code>, '
         '<code>al</code>, <code>pcv</code>. Set optional fields to <code>null</code>.'
@@ -488,11 +520,11 @@ if st.button("Run Prediction", disabled=run_disabled):
                 explanation = result.get("explanation", "No explanation returned.")
                 shap_data   = result.get("shap_contributions", {})
                 lime_data   = result.get("lime_contributions", {})
-                is_ckd      = "CKD detected" in pred
+                is_ckd      = pred == "CKD detected"
 
                 # ── Result banner
                 banner_class = "result-ckd" if is_ckd else "result-healthy"
-                banner_color = "#C45C2E"    if is_ckd else "#2E7D52"
+                banner_color = "var(--rust)" if is_ckd else "var(--green)"
                 st.markdown(
                     f'<div class="{banner_class}">'
                     f'<p class="result-label" style="color:{banner_color}">{pred}</p>'
@@ -507,79 +539,72 @@ if st.button("Run Prediction", disabled=run_disabled):
 
                 # ── Left: SHAP contributions
                 with col_left:
-                    st.markdown('<div class="card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-title">SHAP Feature Contributions</div>', unsafe_allow_html=True)
-                    st.markdown(
-                        '<p style="font-size:0.75rem;color:#7A7870;margin-bottom:0.75rem">'
-                        'Red = pushes toward CKD &nbsp; Green = pushes away'
-                        '</p>',
-                        unsafe_allow_html=True
-                    )
-
                     if shap_data:
                         max_abs = max(abs(v) for v in shap_data.values()) or 1
                         sorted_shap = sorted(shap_data.items(), key=lambda x: abs(x[1]), reverse=True)
-
+                        rows_html = ""
                         for feat, val in sorted_shap:
-                            bar_pct  = min(abs(val) / max_abs * 48, 48)
-                            bar_html = ""
+                            bar_pct = min(abs(val) / max_abs * 48, 48)
                             if val > 0:
                                 bar_html = f'<div class="shap-bar-pos" style="width:{bar_pct}%"></div>'
                             else:
                                 bar_html = f'<div class="shap-bar-neg" style="width:{bar_pct}%"></div>'
-
                             sign = "+" if val > 0 else ""
-                            st.markdown(
+                            rows_html += (
                                 f'<div class="shap-row">'
-                                f'  <div class="shap-feat">{feat}</div>'
-                                f'  <div class="shap-bar-wrap">{bar_html}</div>'
-                                f'  <div class="shap-val">{sign}{val:.3f}</div>'
-                                f'</div>',
-                                unsafe_allow_html=True
+                                f'<div class="shap-feat">{feat}</div>'
+                                f'<div class="shap-bar-wrap">{bar_html}</div>'
+                                f'<div class="shap-val">{sign}{val:.3f}</div>'
+                                f'</div>'
                             )
+                        body_html = rows_html
                     else:
-                        st.markdown('<p style="font-size:0.85rem;color:#7A7870">No SHAP data returned.</p>', unsafe_allow_html=True)
+                        body_html = '<p style="font-size:0.85rem;color:var(--muted)">No SHAP data returned.</p>'
 
-                    st.markdown('</div>', unsafe_allow_html=True)
-
-                # ── Right: LIME contributions
-                with col_right:
-                    st.markdown('<div class="card">', unsafe_allow_html=True)
-                    st.markdown('<div class="card-title">LIME Local Explanation</div>', unsafe_allow_html=True)
                     st.markdown(
-                        '<p style="font-size:0.75rem;color:#7A7870;margin-bottom:0.75rem">'
-                        'Local explanation specific to this patient only'
-                        '</p>',
+                        f'<div class="card">'
+                        f'<div class="card-title">SHAP Feature Contributions</div>'
+                        f'<p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">'
+                        f'Red = pushes toward CKD &nbsp; Green = pushes away</p>'
+                        f'{body_html}'
+                        f'</div>',
                         unsafe_allow_html=True
                     )
 
+                # ── Right: LIME contributions
+                with col_right:
                     if lime_data:
                         max_abs_lime = max(abs(v) for v in lime_data.values()) or 1
                         sorted_lime  = sorted(lime_data.items(), key=lambda x: abs(x[1]), reverse=True)
-
+                        rows_html = ""
                         for condition, weight in sorted_lime:
-                            bar_pct  = min(abs(weight) / max_abs_lime * 48, 48)
-                            bar_html = ""
+                            bar_pct = min(abs(weight) / max_abs_lime * 48, 48)
                             if weight > 0:
                                 bar_html = f'<div class="shap-bar-pos" style="width:{bar_pct}%"></div>'
                             else:
                                 bar_html = f'<div class="shap-bar-neg" style="width:{bar_pct}%"></div>'
-
                             sign = "+" if weight > 0 else ""
-                            # Truncate long condition strings
                             short_cond = condition if len(condition) <= 22 else condition[:20] + ".."
-                            st.markdown(
+                            rows_html += (
                                 f'<div class="shap-row">'
-                                f'  <div class="shap-feat" style="width:130px;font-size:0.72rem">{short_cond}</div>'
-                                f'  <div class="shap-bar-wrap">{bar_html}</div>'
-                                f'  <div class="shap-val">{sign}{weight:.3f}</div>'
-                                f'</div>',
-                                unsafe_allow_html=True
+                                f'<div class="shap-feat" style="width:130px;font-size:0.72rem">{short_cond}</div>'
+                                f'<div class="shap-bar-wrap">{bar_html}</div>'
+                                f'<div class="shap-val">{sign}{weight:.3f}</div>'
+                                f'</div>'
                             )
+                        body_html = rows_html
                     else:
-                        st.markdown('<p style="font-size:0.85rem;color:#7A7870">No LIME data returned.</p>', unsafe_allow_html=True)
+                        body_html = '<p style="font-size:0.85rem;color:var(--muted)">No LIME data returned.</p>'
 
-                    st.markdown('</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="card">'
+                        f'<div class="card-title">LIME Local Explanation</div>'
+                        f'<p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">'
+                        f'Local explanation specific to this patient only</p>'
+                        f'{body_html}'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
 
                 thinking = result.get("thinking", "")
 
@@ -587,23 +612,23 @@ if st.button("Run Prediction", disabled=run_disabled):
                     with st.expander("Claude's reasoning process", expanded=False):
                         st.markdown(
                             f'<div style="'
-                            f'font-family: monospace; font-size: 0.8rem; '
-                            f'line-height: 1.7; color: #4A4A48; '
-                            f'background: #F7F5F0; padding: 1rem; '
+                            f'font-family: monospace; font-size: 0.875rem; '
+                            f'line-height: 1.7; color: var(--text-dim); '
+                            f'background: var(--cream); padding: 1rem; '
                             f'border-radius: 8px; white-space: pre-wrap;">'
                             f'{thinking}'
                             f'</div>',
                             unsafe_allow_html=True
-        )
+                        )
                 # ── Explanation
-                st.markdown('<div class="card">', unsafe_allow_html=True)
                 mode_label = "Patient Explanation" if view_mode == "patient" else "Clinical Summary"
-                st.markdown(f'<div class="card-title">{mode_label}</div>', unsafe_allow_html=True)
                 st.markdown(
-                    f'<div class="explanation-box">{explanation}</div>',
+                    f'<div class="card">'
+                    f'<div class="card-title">{mode_label}</div>'
+                    f'<div class="explanation-box">{explanation}</div>'
+                    f'</div>',
                     unsafe_allow_html=True
                 )
-                st.markdown('</div>', unsafe_allow_html=True)
 
                 # ── Switch view nudge
                 other       = "clinic"   if view_mode == "patient" else "patient"

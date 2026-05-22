@@ -8,6 +8,7 @@ pandas
 numpy<2
 joblib
 anthropic
+mcp
 python-dotenv
 pydantic
 ucimlrepo
