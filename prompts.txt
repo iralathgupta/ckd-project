@@ -61,20 +61,40 @@ ${shap_global}
 Local explanation for this patient:
 ${lime_local}
 
-Step 1 — Tool lookups (required before writing):
-- Use icd10_lookup to retrieve the correct ICD-10 code for the predicted condition (use "chronic kidney disease" or "no kidney disease" as appropriate).
-- Use pubmed_search to find 1–2 recent publications for each of the top 2 biomarkers listed in the patient values above. Use the biomarker name plus "chronic kidney disease" as your search query.
-- If CKD is detected, use fda_drug_info to retrieve prescribing context for one first-line CKD medication (e.g. lisinopril or losartan).
+REQUIRED TOOL CALLS — execute these in order before writing anything.
+Do not skip any step. Do not guess values you can retrieve.
 
-Step 2 — Write the clinical note:
-After completing all tool lookups, produce a concise clinical note that includes:
-- Predicted risk level, confidence, and the retrieved ICD-10 code
-- The top contributing biomarkers with their patient values, and what the literature says about their role in CKD (cite as Author et al., Year, PMID: XXXXXXXX)
-- How this patient's biomarker profile compares to the population-level feature importance context
-- Specific follow-up recommendations; if CKD is detected, include relevant drug notes from the FDA lookup
+STEP 1 — BIOMARKER CONTEXT
+For each of the top features listed below, call health_topics once:
+  health_topics(topic="[full clinical name of the feature]")
+Use the retrieved information for reference ranges and CKD association.
+Do not use your training data for reference ranges — only use what you retrieve.
 
-Critical rules:
-- Do not mention AI, machine learning, feature importance methods, or local explanation methods by name
-- Do not mention tools, MCP, or lookups in the final note — just incorporate the findings naturally
-- Keep it factual and professional — no patient-facing reassurance
-- Keep the note under six short paragraphs
+Features to look up:
+$feature_lookup_list
+
+STEP 2 — LITERATURE
+Call pubmed_search exactly once using the top feature only:
+  pubmed_search(
+    query="chronic kidney disease [first feature in list above] biomarker prognosis",
+    max_results=2,
+    date_range="5"
+  )
+Use the returned titles and authors directly in your citation.
+Do not fabricate citations.
+
+STEP 3 — ICD-10 CODE
+Call lookup_icd_code exactly once:
+  If prediction is CKD detected:
+    lookup_icd_code(description="chronic kidney disease unspecified", max_results=3)
+    Select the most specific code from the results.
+  If prediction is No CKD detected:
+    lookup_icd_code(description="encounter for screening kidney disorder", max_results=3)
+    Select the most appropriate code from the results.
+Do not call this more than once.
+Do not search for the prediction text verbatim — use the standardised descriptions above.
+
+Now write the clinical report using the format below.
+All reference ranges must come from your health_topics calls.
+The ICD-10 code must come from your lookup_icd_code call.
+The citation must come from your pubmed_search call.

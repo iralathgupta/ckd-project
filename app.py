@@ -612,7 +612,7 @@ if st.button("Run Prediction", disabled=run_disabled):
                     with st.expander("Claude's reasoning process", expanded=False):
                         st.markdown(
                             f'<div style="'
-                            f'font-family: monospace; font-size: 0.875rem; '
+                            f'font-family: monospace; font-size: 0.6rem; '
                             f'line-height: 1.7; color: var(--text-dim); '
                             f'background: var(--cream); padding: 1rem; '
                             f'border-radius: 8px; white-space: pre-wrap;">'
