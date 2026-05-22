@@ -166,7 +166,7 @@ def render_prompt(template_name: str, **kwargs) -> str:
         raise ValueError(
             f"Prompt template '{template_name}' not found in {PROMPT_FILE}"
         )
-    return Template(template_text).substitute(**kwargs)
+    return Template(template_text).safe_substitute(**kwargs)
 
 # ── Enums and schemas ─────────────────────────────────────────────────────────
 
