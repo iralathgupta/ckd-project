@@ -299,7 +299,7 @@ st.markdown("""
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/predict")
+API_URL = os.getenv("API_URL", "https://ckd-project-0267.onrender.com/predict")
 
 FEATURE_ORDER = [
     'age', 'bp', 'sg', 'al', 'su', 'rbc', 'pc', 'pcc', 'ba',
