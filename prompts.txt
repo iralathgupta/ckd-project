@@ -71,7 +71,7 @@ Use the retrieved information for reference ranges and CKD association.
 Do not use your training data for reference ranges — only use what you retrieve.
 
 Features to look up:
-$feature_lookup_list
+${feature_lookup_list}
 
 STEP 2 — LITERATURE
 Call pubmed_search exactly once using the top feature only:
@@ -94,7 +94,78 @@ Call lookup_icd_code exactly once:
 Do not call this more than once.
 Do not search for the prediction text verbatim — use the standardised descriptions above.
 
-Now write the clinical report using the format below.
+Now write the clinical report using EXACTLY this format.
 All reference ranges must come from your health_topics calls.
 The ICD-10 code must come from your lookup_icd_code call.
 The citation must come from your pubmed_search call.
+Do not use markdown — no asterisks, no hashes, no bullet dashes, no backticks.
+Use only plain text, uppercase section headers, and dashes as separators.
+
+OUTPUT FORMAT:
+
+============================================================
+NEPHROLOGY AI DECISION SUPPORT REPORT
+============================================================
+
+PREDICTION SUMMARY
+Prediction         : [outcome]
+Confidence         : [confidence]
+CKD Probability    : [ckd_probability]
+Presentation type  : [Typical / Atypical — compare LIME drivers against global SHAP]
+
+------------------------------------------------------------
+BIOMARKER ANALYSIS
+------------------------------------------------------------
+
+For each of the top 5 features, write one block in this exact format:
+
+Feature            : [full clinical name] ([abbreviation])
+Patient value      : [value with units retrieved from health_topics]
+Reference range    : [range retrieved from health_topics]
+Status             : [ELEVATED / LOW / NORMAL / BORDERLINE]
+Clinical meaning   : [one sentence on what this value indicates, from health_topics]
+CKD relevance      : [one sentence on its role in CKD, from health_topics]
+AI contribution    : [pushed toward CKD / pushed away from CKD] (SHAP: [value], LIME: [value])
+Flag               : [write this line only if LIME direction contradicts clinical expectation — state the contradiction in plain English. Otherwise omit this line entirely.]
+
+[blank line between each feature block]
+
+------------------------------------------------------------
+CLINICAL CONTEXT
+------------------------------------------------------------
+
+Typical vs atypical: [2-3 sentences comparing this patient's LIME drivers against
+the global SHAP ranking. State which drivers match, which do not, and what that
+suggests clinically. Write in plain prose.]
+
+------------------------------------------------------------
+SUPPORTING LITERATURE
+------------------------------------------------------------
+
+Title      : [paper title retrieved from pubmed_search]
+Authors    : [author names]
+Journal    : [journal name and year]
+Finding    : [one sentence on the paper's key finding]
+Relevance  : [one sentence connecting this paper to this patient's top biomarker]
+
+------------------------------------------------------------
+CLINICAL CODING
+------------------------------------------------------------
+
+ICD-10 Code   : [code retrieved from lookup_icd_code]
+Description   : [full description from lookup_icd_code]
+Staging note  : [if CKD detected, note that staging G1-G5 requires GFR confirmation.
+                 If no CKD, note that this is a screening result only.]
+
+------------------------------------------------------------
+RECOMMENDATION
+------------------------------------------------------------
+
+Urgency     : [ROUTINE / URGENT / EMERGENT]
+Action      : [one specific next step — referral timeline, repeat testing, specialist]
+Monitoring  : [which biomarkers to retest and at what interval]
+Disclaimer  : This report is AI-generated and intended to support, not replace,
+              clinical judgement. All findings require confirmation by a qualified
+              nephrologist.
+
+============================================================

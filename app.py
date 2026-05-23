@@ -4,6 +4,7 @@ import numpy as np
 import requests
 import json
 import os
+import re
 
 # ── Page config ───────────────────────────────────────────────────────────────
 
@@ -298,12 +299,12 @@ st.markdown("""
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-API_URL = os.getenv("API_URL", "https://ckd-project-0267.onrender.com/predict")
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/predict")
 
 FEATURE_ORDER = [
     'age', 'bp', 'sg', 'al', 'su', 'rbc', 'pc', 'pcc', 'ba',
-    'bgr', 'bu', 'sc', 'sod', 'pot', 'hemo', 'pcv', 'wbcc',
-    'rbcc', 'htn', 'dm', 'cad', 'appet', 'pe', 'ane'
+    'bgr', 'bu', 'sc', 'sod', 'pot', 'hemo', 'pcv', 'wc',
+    'rc', 'htn', 'dm', 'cad', 'appet', 'pe', 'ane'
 ]
 
 MANDATORY_FIELDS = ['hemo', 'sg', 'sc', 'al', 'pcv']
@@ -314,8 +315,8 @@ FEATURE_LABELS = {
     'pc': 'Pus Cells', 'pcc': 'Pus Cell Clumps', 'ba': 'Bacteria',
     'bgr': 'Blood Glucose Random', 'bu': 'Blood Urea', 'sc': 'Serum Creatinine',
     'sod': 'Sodium', 'pot': 'Potassium', 'hemo': 'Haemoglobin',
-    'pcv': 'Packed Cell Volume', 'wbcc': 'White Blood Cell Count',
-    'rbcc': 'Red Blood Cell Count', 'htn': 'Hypertension',
+    'pcv': 'Packed Cell Volume', 'wc': 'White Blood Cell Count',
+    'rc': 'Red Blood Cell Count', 'htn': 'Hypertension',
     'dm': 'Diabetes Mellitus', 'cad': 'Coronary Artery Disease',
     'appet': 'Appetite', 'pe': 'Pedal Edema', 'ane': 'Anaemia'
 }
@@ -325,33 +326,13 @@ FEATURE_LABELS = {
 @st.cache_data(show_spinner="Loading dataset...")
 def load_test_data():
     try:
-        from ucimlrepo import fetch_ucirepo
-        from sklearn.model_selection import train_test_split
-        from sklearn.preprocessing import LabelEncoder
-        from sklearn.impute import KNNImputer
-
-        ckd = fetch_ucirepo(id=336)
-        df  = pd.concat([ckd.data.features, ckd.data.targets], axis=1)
-        df['class'] = df['class'].str.strip()
-
-        cat_cols = df.select_dtypes(include='object').columns.tolist()
-        df_encoded = df.copy()
-        le = LabelEncoder()
-        for col in cat_cols:
-            df_encoded[col] = df_encoded[col].fillna('missing')
-            df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
-
-        from sklearn.impute import KNNImputer
-        imputer    = KNNImputer(n_neighbors=5)
-        df_imputed = pd.DataFrame(imputer.fit_transform(df_encoded), columns=df.columns)
-
-        X = df_imputed.drop('class', axis=1)
-        y = df_imputed['class']
-        _, X_test, _, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42, stratify=y
-        )
+        X_test = pd.read_csv("test_data_X.csv")
+        y_test = pd.read_csv("test_data_y.csv").squeeze()
         return X_test.reset_index(drop=True), y_test.reset_index(drop=True), None
-
+    except FileNotFoundError:
+        return None, None, "test_data_X.csv or test_data_y.csv not found."
+    except Exception as e:
+        return None, None, str(e)
     except Exception as e:
         return None, None, str(e)
 
@@ -469,7 +450,7 @@ elif input_mode == "manual":
         "hemo": 11.2, "sg": 1.015, "sc": 1.2, "al": 1.0, "pcv": 38.0,
         "age": None, "bp": None, "bgr": None, "bu": None, "sod": None,
         "htn": None, "dm": None, "su": None, "rbc": None, "pc": None,
-        "pcc": None, "ba": None, "pot": None, "wbcc": None, "rbcc": None,
+        "pcc": None, "ba": None, "pot": None, "wc": None, "rc": None,
         "cad": None, "appet": None, "pe": None, "ane": None
     }
 
@@ -508,7 +489,7 @@ if st.button("Run Prediction", disabled=run_disabled):
                 API_URL,
                 json    = patient_data,
                 params  = {"view": view_mode},
-                timeout = 90
+                timeout = 300 if view_mode == "clinic" else 90
             )
 
             if response.status_code == 200:
@@ -518,8 +499,6 @@ if st.button("Run Prediction", disabled=run_disabled):
                 conf        = result.get("confidence", 0)
                 ckd_prob    = result.get("ckd_probability", 0)
                 explanation = result.get("explanation", "No explanation returned.")
-                shap_data   = result.get("shap_contributions", {})
-                lime_data   = result.get("lime_contributions", {})
                 is_ckd      = pred == "CKD detected"
 
                 # ── Result banner
@@ -535,91 +514,7 @@ if st.button("Run Prediction", disabled=run_disabled):
                     unsafe_allow_html=True
                 )
 
-                col_left, col_right = st.columns([1, 1])
-
-                # ── Left: SHAP contributions
-                with col_left:
-                    if shap_data:
-                        max_abs = max(abs(v) for v in shap_data.values()) or 1
-                        sorted_shap = sorted(shap_data.items(), key=lambda x: abs(x[1]), reverse=True)
-                        rows_html = ""
-                        for feat, val in sorted_shap:
-                            bar_pct = min(abs(val) / max_abs * 48, 48)
-                            if val > 0:
-                                bar_html = f'<div class="shap-bar-pos" style="width:{bar_pct}%"></div>'
-                            else:
-                                bar_html = f'<div class="shap-bar-neg" style="width:{bar_pct}%"></div>'
-                            sign = "+" if val > 0 else ""
-                            rows_html += (
-                                f'<div class="shap-row">'
-                                f'<div class="shap-feat">{feat}</div>'
-                                f'<div class="shap-bar-wrap">{bar_html}</div>'
-                                f'<div class="shap-val">{sign}{val:.3f}</div>'
-                                f'</div>'
-                            )
-                        body_html = rows_html
-                    else:
-                        body_html = '<p style="font-size:0.85rem;color:var(--muted)">No SHAP data returned.</p>'
-
-                    st.markdown(
-                        f'<div class="card">'
-                        f'<div class="card-title">SHAP Feature Contributions</div>'
-                        f'<p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">'
-                        f'Red = pushes toward CKD &nbsp; Green = pushes away</p>'
-                        f'{body_html}'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
-
-                # ── Right: LIME contributions
-                with col_right:
-                    if lime_data:
-                        max_abs_lime = max(abs(v) for v in lime_data.values()) or 1
-                        sorted_lime  = sorted(lime_data.items(), key=lambda x: abs(x[1]), reverse=True)
-                        rows_html = ""
-                        for condition, weight in sorted_lime:
-                            bar_pct = min(abs(weight) / max_abs_lime * 48, 48)
-                            if weight > 0:
-                                bar_html = f'<div class="shap-bar-pos" style="width:{bar_pct}%"></div>'
-                            else:
-                                bar_html = f'<div class="shap-bar-neg" style="width:{bar_pct}%"></div>'
-                            sign = "+" if weight > 0 else ""
-                            short_cond = condition if len(condition) <= 22 else condition[:20] + ".."
-                            rows_html += (
-                                f'<div class="shap-row">'
-                                f'<div class="shap-feat" style="width:130px;font-size:0.72rem">{short_cond}</div>'
-                                f'<div class="shap-bar-wrap">{bar_html}</div>'
-                                f'<div class="shap-val">{sign}{weight:.3f}</div>'
-                                f'</div>'
-                            )
-                        body_html = rows_html
-                    else:
-                        body_html = '<p style="font-size:0.85rem;color:var(--muted)">No LIME data returned.</p>'
-
-                    st.markdown(
-                        f'<div class="card">'
-                        f'<div class="card-title">LIME Local Explanation</div>'
-                        f'<p style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">'
-                        f'Local explanation specific to this patient only</p>'
-                        f'{body_html}'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
-
-                thinking = result.get("thinking", "")
-
-                if thinking and view_mode == "clinic":
-                    with st.expander("Claude's reasoning process", expanded=False):
-                        st.markdown(
-                            f'<div style="'
-                            f'font-family: monospace; font-size: 0.6rem; '
-                            f'line-height: 1.7; color: var(--text-dim); '
-                            f'background: var(--cream); padding: 1rem; '
-                            f'border-radius: 8px; white-space: pre-wrap;">'
-                            f'{thinking}'
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
+                explanation = result.get("explanation", "No explanation returned.")
                 # ── Explanation
                 mode_label = "Patient Explanation" if view_mode == "patient" else "Clinical Summary"
                 st.markdown(

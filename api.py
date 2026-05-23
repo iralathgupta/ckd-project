@@ -52,8 +52,8 @@ client = anthropic.Anthropic(api_key=anthropic_api_key)
 # this has to match exactly what the model was trained on — don't reorder
 FEATURE_ORDER = [
     'age', 'bp', 'sg', 'al', 'su', 'rbc', 'pc', 'pcc', 'ba',
-    'bgr', 'bu', 'sc', 'sod', 'pot', 'hemo', 'pcv', 'wbcc',
-    'rbcc', 'htn', 'dm', 'cad', 'appet', 'pe', 'ane'
+    'bgr', 'bu', 'sc', 'sod', 'pot', 'hemo', 'pcv', 'wc',
+    'rc', 'htn', 'dm', 'cad', 'appet', 'pe', 'ane'
 ]
 
 # ── Load model artifacts ──────────────────────────────────────────────────────
@@ -98,38 +98,33 @@ SHAP_GLOBAL_SUMMARY = build_shap_global_summary(SHAP_VALUES_TEST)
 # realistic perturbations around a test point — so we re-run the same
 # preprocessing pipeline from the notebook to get X_train back
 def build_lime_explainer() -> LimeTabularExplainer:
-    ckd = fetch_ucirepo(id=336)
-    df  = pd.concat([ckd.data.features, ckd.data.targets], axis=1)
-    df['class'] = df['class'].str.strip()
-
-    cat_cols   = df.select_dtypes(include='object').columns.tolist()
-    df_encoded = df.copy()
-    le         = LabelEncoder()
-
-    for col in cat_cols:
-        df_encoded[col] = df_encoded[col].fillna('missing')
-        df_encoded[col] = le.fit_transform(df_encoded[col].astype(str))
-
-    imputer    = KNNImputer(n_neighbors=5)
-    df_imputed = pd.DataFrame(imputer.fit_transform(df_encoded), columns=df.columns)
-
-    X = df_imputed.drop('class', axis=1)
-    y = df_imputed['class']
-
-    # same split params as the notebook so we get the same X_train
-    X_train, _, _, _ = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
+    X_train = pd.read_csv("train_data_X.csv")
     return LimeTabularExplainer(
         training_data = X_train.values,
         feature_names = FEATURE_ORDER,
         class_names   = ['notckd', 'ckd'],
         mode          = 'classification'
     )
+# Build LIME explainer lazily to avoid failing at import time when network is unavailable.
+lime_explainer = None
+lime_build_error = None
 
-# this takes ~15s on first startup because it fetches the dataset and runs KNN
-lime_explainer = build_lime_explainer()
+def get_lime_explainer() -> Optional[LimeTabularExplainer]:
+    """Return a cached LIME explainer, building it on first use.
+
+    If building fails (network, SSL, etc.) we cache the error and return None.
+    """
+    global lime_explainer, lime_build_error
+    if lime_explainer is not None:
+        return lime_explainer
+    try:
+        lime_explainer = build_lime_explainer()
+        lime_build_error = None
+    except Exception as e:
+        lime_build_error = str(e)
+        print(f"Failed to build LIME explainer: {e}")
+        return None
+    return lime_explainer
 
 # ── Prompt templates ──────────────────────────────────────────────────────────
 
@@ -199,8 +194,8 @@ class PatientData(BaseModel):
     pcc:   Optional[int]   = Field(None, description="Pus cell clumps (0=notpresent, 1=present)")
     ba:    Optional[int]   = Field(None, description="Bacteria (0=notpresent, 1=present)")
     pot:   Optional[float] = Field(None, description="Potassium (mEq/L)")
-    wbcc:  Optional[float] = Field(None, description="White blood cell count (cells/cumm)")
-    rbcc:  Optional[float] = Field(None, description="Red blood cell count (millions/cmm)")
+    wc:  Optional[float] = Field(None, description="White blood cell count (cells/cumm)")
+    rc:  Optional[float] = Field(None, description="Red blood cell count (millions/cmm)")
     cad:   Optional[int]   = Field(None, description="Coronary artery disease (0=no, 1=yes)")
     appet: Optional[int]   = Field(None, description="Appetite (0=good, 1=poor)")
     pe:    Optional[int]   = Field(None, description="Pedal edema (0=no, 1=yes)")
@@ -236,11 +231,22 @@ def extract_shap(df_input: pd.DataFrame) -> np.ndarray:
     return vals[:len(FEATURE_ORDER)]
 
 
+def _predict_proba(X: np.ndarray) -> np.ndarray:
+    # LIME passes raw numpy arrays; wrap in a DataFrame so sklearn
+    # doesn't warn about missing feature names
+    return model.predict_proba(pd.DataFrame(X, columns=FEATURE_ORDER))
+
+
 def extract_lime(df_input: pd.DataFrame, top_n: int = 5) -> list:
-    # runs LIME on this specific patient — purely local, ignores all other patients
-    exp = lime_explainer.explain_instance(
+    expl = get_lime_explainer()
+    if expl is None:
+        # LIME explainer couldn't be built (network or dependency issue).
+        # Return empty explanation so the API can still operate.
+        return []
+
+    exp = expl.explain_instance(
         df_input.iloc[0].values,
-        model.predict_proba,
+        _predict_proba,
         num_features=top_n
     )
     return exp.as_list()
@@ -282,6 +288,7 @@ def build_patient_prompt(outcome: str, confidence: float, ckd_probability: float
 def build_clinic_prompt(outcome: str, confidence: float, ckd_probability: float,
                         pairs: list, shap_lines: list,
                         lime_local: str, shap_global: str) -> str:
+    feature_lookup_list = "\n".join([f"- {f}" for f, s, v in pairs])
     patient_values = "\n".join([
         f"- {f}: {float(v):.2f} (contribution: {float(s):+.3f})"
         for f, s, v in pairs
@@ -292,75 +299,113 @@ def build_clinic_prompt(outcome: str, confidence: float, ckd_probability: float,
         outcome         = outcome,
         confidence      = f"{confidence:.1%}",
         ckd_probability = f"{ckd_probability:.1%}",
+        feature_lookup_list = feature_lookup_list,
         patient_values  = patient_values,
         lime_local      = lime_local,
         shap_global     = shap_global
     )
 
 
-async def generate_clinic_report(prompt_text: str) -> tuple[str, str]:
-    server_params = StdioServerParameters(
-        command = "healthcare-mcp",
-        args    = []
+async def _create_message(**kwargs):
+    for attempt in range(4):
+        try:
+            return await asyncio.to_thread(client.messages.create, **kwargs)
+        except Exception as e:
+            # Some versions of the Anthropic client expose an OverloadedError
+            # class; others do not. Avoid referencing a missing attribute and
+            # instead detect transient overload/network errors heuristically.
+            msg = str(e).lower()
+            status = getattr(e, 'status_code', None)
+            is_transient = (
+                'overload' in msg or 'overloaded' in msg or
+                '503' in msg or status in (502, 503, 504)
+            )
+            if is_transient and attempt < 3:
+                await asyncio.sleep(2 ** attempt)  # 1 s, 2 s, 4 s
+                continue
+            raise
+
+
+async def _call_claude_no_tools(prompt_text: str) -> tuple[str, str]:
+    response = await _create_message(
+        model      = "claude-sonnet-4-6",
+        max_tokens = 16000,
+        thinking   = {"type": "enabled", "budget_tokens": 10000},
+        messages   = [{"role": "user", "content": prompt_text}]
     )
+    thinking_text    = ""
+    explanation_text = ""
+    for block in response.content:
+        if block.type == "thinking":
+            thinking_text    += block.thinking
+        elif block.type == "text":
+            explanation_text += block.text
+    return explanation_text, thinking_text
 
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
 
-            tools_response = await session.list_tools()
-            tools = [
-                {
-                    "name"        : t.name,
-                    "description" : t.description or "",
-                    "input_schema": t.inputSchema or {"type": "object", "properties": {}}
-                }
-                for t in tools_response.tools
-            ]
+async def generate_clinic_report(prompt_text: str) -> tuple[str, str]:
+    try:
+        server_params = StdioServerParameters(command="healthcare-mcp", args=[])
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
 
-            messages      = [{"role": "user", "content": prompt_text}]
-            thinking_text = ""
+                tools_response = await session.list_tools()
+                tools = [
+                    {
+                        "name"        : t.name,
+                        "description" : t.description or "",
+                        "input_schema": t.inputSchema or {"type": "object", "properties": {}}
+                    }
+                    for t in tools_response.tools
+                ]
 
-            while True:
-                response = await asyncio.to_thread(
-                    client.messages.create,
-                    model    = "claude-sonnet-4-6",
-                    max_tokens = 16000,
-                    thinking = {"type": "enabled", "budget_tokens": 10000},
-                    tools    = tools,
-                    messages = messages
-                )
+                messages      = [{"role": "user", "content": prompt_text}]
+                thinking_text = ""
 
-                for block in response.content:
-                    if block.type == "thinking":
-                        thinking_text += block.thinking
-
-                if response.stop_reason != "tool_use":
-                    explanation = "".join(
-                        b.text for b in response.content if b.type == "text"
+                while True:
+                    response = await _create_message(
+                        model      = "claude-sonnet-4-6",
+                        max_tokens = 16000,
+                        thinking   = {"type": "enabled", "budget_tokens": 10000},
+                        tools      = tools,
+                        messages   = messages
                     )
-                    return explanation, thinking_text
 
-                tool_results = []
-                for block in response.content:
-                    if block.type == "tool_use":
-                        try:
-                            result      = await session.call_tool(block.name, block.input)
-                            content_str = "\n".join(
-                                c.text if hasattr(c, "text") else str(c)
-                                for c in result.content
-                            )
-                        except Exception as exc:
-                            content_str = f"Tool error: {exc}"
+                    for block in response.content:
+                        if block.type == "thinking":
+                            thinking_text += block.thinking
 
-                        tool_results.append({
-                            "type"        : "tool_result",
-                            "tool_use_id" : block.id,
-                            "content"     : content_str
-                        })
+                    if response.stop_reason != "tool_use":
+                        explanation = "".join(
+                            b.text for b in response.content if b.type == "text"
+                        )
+                        return explanation, thinking_text
 
-                messages.append({"role": "assistant", "content": response.content})
-                messages.append({"role": "user",      "content": tool_results})
+                    tool_results = []
+                    for block in response.content:
+                        if block.type == "tool_use":
+                            try:
+                                result      = await session.call_tool(block.name, block.input)
+                                content_str = "\n".join(
+                                    c.text if hasattr(c, "text") else str(c)
+                                    for c in result.content
+                                )
+                            except Exception as exc:
+                                content_str = f"Tool error: {exc}"
+
+                            tool_results.append({
+                                "type"        : "tool_result",
+                                "tool_use_id" : block.id,
+                                "content"     : content_str
+                            })
+
+                    messages.append({"role": "assistant", "content": response.content})
+                    messages.append({"role": "user",      "content": tool_results})
+
+    except FileNotFoundError:
+        # healthcare-mcp not installed on this host — fall back to direct Claude call
+        return await _call_claude_no_tools(prompt_text)
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -443,14 +488,24 @@ async def predict(patient: PatientData, view: ReportView = ReportView.patient):
                 pairs           = pairs,
                 shap_lines      = shap_lines
             )
-            response         = await asyncio.to_thread(
-                client.messages.create,
+            response         = await _create_message(
                 model      = "claude-haiku-4-5-20251001",
                 max_tokens = 400,
                 messages   = [{"role": "user", "content": prompt_text}]
             )
-            explanation_text = response.content[0].text
-            thinking_text    = ""
+            explanation_text = "".join(
+                block.text for block in response.content
+                if getattr(block, "type", None) == "text"
+            )
+            thinking_text = "".join(
+                block.thinking for block in response.content
+                if getattr(block, "type", None) == "thinking"
+            )
+            if not explanation_text:
+                raise RuntimeError(
+                    "Claude response contained no text blocks; full response was: "
+                    f"{response.content}"
+                )
 
         else:  # clinic
             prompt_text = build_clinic_prompt(
@@ -478,7 +533,12 @@ async def predict(patient: PatientData, view: ReportView = ReportView.patient):
     except Exception as exc:
         # print the full traceback to the uvicorn terminal for debugging
         print(traceback.format_exc())
+        detail = str(exc)
+        if exc.__cause__ is not None:
+            detail += f" | cause: {exc.__cause__}"
+        elif exc.__context__ is not None:
+            detail += f" | context: {exc.__context__}"
         return JSONResponse(
             status_code=500,
-            content={"error": "Prediction failed", "detail": str(exc)}
+            content={"error": "Prediction failed", "detail": detail}
         )
